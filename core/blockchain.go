@@ -26,6 +26,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"encoding/json"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -43,6 +44,7 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/hashicorp/golang-lru"
 	"gopkg.in/karalabe/cookiejar.v2/collections/prque"
+	"github.com/Shopify/sarama"
 )
 
 var (
@@ -1208,17 +1210,40 @@ const statsReportLimit = 8 * time.Second
 // report prints statistics if some number of blocks have been processed
 // or more than a few seconds have passed since the last message.
 func (st *insertStats) report(chain []*types.Block, index int, cache common.StorageSize) {
+	config := sarama.NewConfig()
+	config.Producer.Return.Successes = true
+	producer, err := sarama.NewAsyncProducer([]string{"localhost:9092"}, config)
+
+	if err != nil {
+    	panic(err)
+	}
+
 	// Fetch the timings for the batch
 	var (
 		now     = mclock.Now()
 		elapsed = time.Duration(now) - time.Duration(st.startTime)
 	)
 	// If we're at the last block of the batch or report period reached, log
-	if index == len(chain)-1 || elapsed >= statsReportLimit {
+	if index == len(chain)-1 {
 		var (
 			end = chain[index]
 			txs = countTransactions(chain[st.lastIndex : index+1])
 		)
+		for _, v := range chain[st.lastIndex : index+1] {
+			for _, t := range v.Transactions()[:] {
+				// might want to pass off transaction retrieval in future to decrease bottleneck on node
+				tx_val, err := json.Marshal(t)
+				if err != nil {
+       				fmt.Println(err)
+       			}
+       			transactionMessage := &sarama.ProducerMessage{Topic: "transaction_made_test3", Value: sarama.StringEncoder(string(tx_val))}
+       			producer.Input() <- transactionMessage
+			}
+		}
+
+		message := &sarama.ProducerMessage{Topic: "block_created", Value: sarama.StringEncoder(end.Hash().Str())}
+		producer.Input() <- message
+		producer.AsyncClose()
 		context := []interface{}{
 			"blocks", st.processed, "txs", txs, "mgas", float64(st.usedGas) / 1000000,
 			"elapsed", common.PrettyDuration(elapsed), "mgasps", float64(st.usedGas) * 1000 / float64(elapsed),
